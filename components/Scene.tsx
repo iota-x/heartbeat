@@ -2,17 +2,26 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
+import { EffectComposer, Bloom } from "@react-three/postprocessing";
 import * as THREE from "three";
 
 import { type FeedTx, type SlotSummary } from "@/lib/feed";
 import { startFeed, type FeedState } from "@/lib/feedSource";
+import { createShared, type SceneShared } from "@/lib/sceneState";
+import { HeartbeatAudio } from "@/lib/audio";
+import Whales from "@/components/Whales";
+import Blocks from "@/components/Blocks";
+import Hud from "@/components/Hud";
+import Overlay from "@/components/Overlay";
 
 /* ------------------------------------------------------------------ */
-/*  the stream: transactions spawn on an outer ring and fall toward    */
-/*  the core; every ~400ms the slot closes and the core pulses.        */
+/*  the stream: transactions spawn on an outer ring and spiral toward  */
+/*  the core; every ~400ms the slot closes — the accumulated energy    */
+/*  collapses inward, the core flashes, and a block is ejected into    */
+/*  the receding chain.                                                */
 /*                                                                     */
-/*  one InstancedMesh, fixed pool, zero per-frame allocations — the    */
-/*  oldest particle is recycled when the pool wraps.                   */
+/*  one InstancedMesh per element class, fixed pools, zero per-frame   */
+/*  allocations — the oldest particle is recycled when a pool wraps.   */
 /* ------------------------------------------------------------------ */
 
 const POOL = 4000;
@@ -31,12 +40,7 @@ const KIND_COLOR: Record<FeedTx["kind"], THREE.Color> = {
 const SPAWN_RADIUS = 9;
 const CAPTURE_RADIUS = 0.7;
 
-interface Shared {
-  queue: FeedTx[];
-  pulse: { value: number };
-}
-
-const Particles = ({ shared }: { shared: Shared }) => {
+const Particles = ({ shared }: { shared: SceneShared }) => {
   const mesh = useRef<THREE.InstancedMesh>(null);
 
   // particle state lives in flat preallocated arrays
@@ -72,11 +76,13 @@ const Particles = ({ shared }: { shared: Shared }) => {
       s.pos[i * 3 + 1] = y;
       s.pos[i * 3 + 2] = z;
 
-      // aim at the core; heavier tx fall faster
+      // aim at the core with a tangential component so streams spiral in;
+      // heavier tx fall faster
       const speed = 2.2 + tx.weight * 0.5 + Math.random() * 0.8;
       const len = Math.hypot(x, y, z) || 1;
-      s.vel[i * 3] = (-x / len) * speed;
-      s.vel[i * 3 + 1] = (-y / len) * speed;
+      const swirl = 0.35;
+      s.vel[i * 3] = (-x / len) * speed + (-y / len) * speed * swirl;
+      s.vel[i * 3 + 1] = (-y / len) * speed + (x / len) * speed * swirl;
       s.vel[i * 3 + 2] = (-z / len) * speed;
 
       s.scale[i] = 0.03 + tx.weight * 0.035;
@@ -88,16 +94,22 @@ const Particles = ({ shared }: { shared: Shared }) => {
       if (m.instanceColor) m.instanceColor.needsUpdate = true;
     }
 
-    // advance + recycle
+    // advance + recycle; slot close sucks everything toward the core
+    const collapsePull = shared.collapse.value * 9 * dt;
     for (let i = 0; i < POOL; i++) {
       if (!s.alive[i]) {
         s.dummy.position.set(0, 0, 9999); // park dead instances off-screen
         s.dummy.scale.setScalar(0.0001);
       } else {
+        const d =
+          Math.hypot(s.pos[i * 3], s.pos[i * 3 + 1], s.pos[i * 3 + 2]) || 1;
+        const pull = (1.2 * dt + collapsePull) / d;
+        s.vel[i * 3] += -s.pos[i * 3] * pull;
+        s.vel[i * 3 + 1] += -s.pos[i * 3 + 1] * pull;
+        s.vel[i * 3 + 2] += -s.pos[i * 3 + 2] * pull;
         s.pos[i * 3] += s.vel[i * 3] * dt;
         s.pos[i * 3 + 1] += s.vel[i * 3 + 1] * dt;
         s.pos[i * 3 + 2] += s.vel[i * 3 + 2] * dt;
-        const d = Math.hypot(s.pos[i * 3], s.pos[i * 3 + 1], s.pos[i * 3 + 2]);
         if (d < CAPTURE_RADIUS) s.alive[i] = 0; // absorbed by the core
         s.dummy.position.set(s.pos[i * 3], s.pos[i * 3 + 1], s.pos[i * 3 + 2]);
         s.dummy.scale.setScalar(s.scale[i]);
@@ -109,21 +121,30 @@ const Particles = ({ shared }: { shared: Shared }) => {
   });
 
   return (
-    <instancedMesh ref={mesh} args={[undefined, undefined, POOL]}>
+    <instancedMesh
+      ref={mesh}
+      args={[undefined, undefined, POOL]}
+      frustumCulled={false}
+    >
       <sphereGeometry args={[1, 6, 6]} />
       <meshBasicMaterial toneMapped={false} />
     </instancedMesh>
   );
 };
 
-/* core — the current slot; flashes when the slot closes */
-const Core = ({ shared }: { shared: Shared }) => {
+/* core — the current slot; flashes HDR-hot when the slot closes so the
+ * bloom pass catches it */
+const CORE_FLASH = new THREE.Color("#a78bfa");
+
+const Core = ({ shared }: { shared: SceneShared }) => {
   const mesh = useRef<THREE.Mesh>(null);
   const mat = useRef<THREE.MeshBasicMaterial>(null);
+  const glowMat = useRef<THREE.MeshBasicMaterial>(null);
 
   useFrame((state, delta) => {
     const p = shared.pulse;
     p.value *= Math.exp(-delta * 6); // pulse decays fast
+    shared.collapse.value *= Math.exp(-delta * 8); // collapse is a snap
     if (mesh.current) {
       const breathe = 1 + Math.sin(state.clock.elapsedTime * 1.5) * 0.04;
       mesh.current.scale.setScalar(breathe + p.value * 0.5);
@@ -131,71 +152,154 @@ const Core = ({ shared }: { shared: Shared }) => {
       mesh.current.rotation.z += delta * 0.07;
     }
     if (mat.current) {
-      mat.current.color.setScalar(0); // keep it a silhouette…
-      mat.current.color.lerp(CORE_FLASH, 0.25 + p.value); // …that flashes violet
+      // silhouette that flashes violet past 1.0 → blooms
+      mat.current.color.copy(CORE_FLASH).multiplyScalar(0.3 + p.value * 2.2);
+    }
+    if (glowMat.current) {
+      glowMat.current.color.copy(CORE_FLASH).multiplyScalar(p.value * 4);
     }
   });
 
   return (
-    <mesh ref={mesh}>
-      <icosahedronGeometry args={[CAPTURE_RADIUS, 1]} />
-      <meshBasicMaterial ref={mat} wireframe toneMapped={false} />
-    </mesh>
+    <group>
+      <mesh ref={mesh}>
+        <icosahedronGeometry args={[CAPTURE_RADIUS, 1]} />
+        <meshBasicMaterial ref={mat} wireframe toneMapped={false} />
+      </mesh>
+      {/* inner ember — only visible (and HDR) during the flash */}
+      <mesh>
+        <sphereGeometry args={[CAPTURE_RADIUS * 0.55, 16, 16]} />
+        <meshBasicMaterial ref={glowMat} toneMapped={false} />
+      </mesh>
+    </group>
   );
 };
 
-const CORE_FLASH = new THREE.Color("#a78bfa");
+/* slow cinematic drift + impact shake, always looking at the core */
+const CameraRig = ({ shared }: { shared: SceneShared }) => {
+  useFrame((state, delta) => {
+    shared.shake.value *= Math.exp(-delta * 2.5);
+    const t = state.clock.elapsedTime;
+    const k = shared.shake.value;
+    const cam = state.camera;
+    cam.position.x = Math.sin(t * 0.05) * 0.9 + Math.sin(t * 43.7) * 0.14 * k;
+    cam.position.y = Math.sin(t * 0.041 + 2) * 0.5 + Math.sin(t * 38.1 + 1.7) * 0.11 * k;
+    cam.position.z = 13 + Math.sin(t * 0.033 + 4) * 0.4 + Math.sin(t * 51.3) * 0.08 * k;
+    cam.lookAt(0, 0, 0);
+  });
+  return null;
+};
 
 /* ------------------------------------------------------------------ */
 
 const Scene = () => {
-  const shared = useRef<Shared>({ queue: [], pulse: { value: 0 } });
+  const shared = useRef<SceneShared>(null!);
+  if (shared.current === null) shared.current = createShared();
+  const audio = useRef<HeartbeatAudio>(null!);
+  if (audio.current === null) audio.current = new HeartbeatAudio();
+
   const [slot, setSlot] = useState<SlotSummary | null>(null);
   const [feed, setFeed] = useState<FeedState>({
     mode: "synthetic",
     label: "connecting…",
   });
+  const [tps, setTps] = useState(0);
+  const [muted, setMuted] = useState(true);
+  const [toast, setToast] = useState<{ amountSol: number; id: number } | null>(null);
+  const [showOverlay, setShowOverlay] = useState(false);
+  const tpsRef = useRef(0);
+  const lastToastAt = useRef(0);
+
+  // whale impacts: shake the camera, thump, toast (throttled)
+  useEffect(() => {
+    const sh = shared.current;
+    sh.fx.onWhaleImpact = (intensity, amountSol) => {
+      sh.shake.value = Math.min(1, sh.shake.value + 0.35 + 0.5 * intensity);
+      sh.pulse.value = Math.min(1.2, sh.pulse.value + 0.35);
+      audio.current.thump(intensity);
+      const now = Date.now();
+      if (amountSol > 0 && now - lastToastAt.current > 1_500) {
+        lastToastAt.current = now;
+        setToast({ amountSol, id: now });
+      }
+    };
+  }, []);
+
+  // overlay decision must wait for the client (localStorage) — deferred a
+  // frame to keep hydration clean
+  useEffect(() => {
+    if (localStorage.getItem("hb-seen")) return;
+    const id = requestAnimationFrame(() => setShowOverlay(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
 
   useEffect(() => {
     return startFeed({
       onTx: (tx) => {
+        const sh = shared.current;
+        if (tx.whale) {
+          if (sh.whaleQueue.length < 48) sh.whaleQueue.push(tx);
+          return;
+        }
         // drop excess dust under backpressure, never the interesting stuff
-        if (shared.current.queue.length > 600 && tx.kind === "vote") return;
-        shared.current.queue.push(tx);
+        if (sh.queue.length > 600 && tx.kind === "vote") return;
+        sh.queue.push(tx);
       },
       onSlot: (s) => {
-        shared.current.pulse.value = 1;
+        const sh = shared.current;
+        sh.pulse.value = 1;
+        sh.collapse.value = 1;
+        sh.eject.count++;
+        audio.current.beat();
+        const inst = s.txCount / 0.4;
+        tpsRef.current =
+          tpsRef.current === 0 ? inst : tpsRef.current * 0.75 + inst * 0.25;
+        setTps(tpsRef.current);
         setSlot(s);
       },
       onState: setFeed,
     });
   }, []);
 
+  const toggleSound = () => {
+    setMuted((m) => {
+      if (m) audio.current.enable();
+      else audio.current.disable();
+      return !m;
+    });
+  };
+
+  const dismissOverlay = () => {
+    localStorage.setItem("hb-seen", "1");
+    setShowOverlay(false);
+  };
+
   return (
     <div className="fixed inset-0 bg-[#07050d]">
-      <Canvas camera={{ position: [0, 0, 13], fov: 50 }} dpr={[1, 1.5]}>
+      <Canvas
+        camera={{ position: [0, 0, 13], fov: 50 }}
+        dpr={[1, 1.5]}
+        gl={{ antialias: false, powerPreference: "high-performance" }}
+      >
         <Particles shared={shared.current} />
+        <Whales shared={shared.current} />
+        <Blocks shared={shared.current} />
         <Core shared={shared.current} />
+        <CameraRig shared={shared.current} />
+        <EffectComposer multisampling={0}>
+          <Bloom mipmapBlur intensity={0.85} luminanceThreshold={1} luminanceSmoothing={0.1} />
+        </EffectComposer>
       </Canvas>
 
-      {/* minimal HUD — numbers stay ambient, the scene is the interface */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between p-6 font-mono text-xs text-white/50">
-        <div>
-          <p className="text-white/80">heartbeat</p>
-          <p className="mt-1">
-            every light is a transaction ·{" "}
-            <span className={feed.mode === "live" ? "text-emerald-300/70" : ""}>
-              {feed.label}
-            </span>
-          </p>
-        </div>
-        {slot && (
-          <div className="text-right">
-            <p className="text-white/80">slot {slot.slot.toLocaleString()}</p>
-            <p className="mt-1">{slot.txCount} tx / 400ms</p>
-          </div>
-        )}
-      </div>
+      <Hud
+        feed={feed}
+        slot={slot}
+        tps={tps}
+        muted={muted}
+        onToggleSound={toggleSound}
+        toast={toast}
+      />
+      {showOverlay && <Overlay onDismiss={dismissOverlay} />}
     </div>
   );
 };

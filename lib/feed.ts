@@ -75,7 +75,8 @@ export const startSyntheticFeed = ({
       carry -= 1;
       txInSlot++;
       const kind = pickKind();
-      const whale = kind !== "vote" && Math.random() < 0.008;
+      // rare on purpose — a whale every ~10s reads as an event, not noise
+      const whale = kind !== "vote" && Math.random() < 0.0005;
       const weight = kind === "vote" ? 0.35 : whale ? 6 : 0.8 + Math.random();
       const amountSol =
         kind === "vote"
