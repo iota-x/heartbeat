@@ -12,6 +12,9 @@ import { HeartbeatAudio } from "@/lib/audio";
 import { TIERS, WARMUP_S, WINDOW_S, MIN_FPS } from "@/lib/quality";
 import Whales from "@/components/Whales";
 import Blocks from "@/components/Blocks";
+import Starfield from "@/components/Starfield";
+import Shockwave from "@/components/Shockwave";
+import Validators from "@/components/Validators";
 import Hud from "@/components/Hud";
 import Overlay from "@/components/Overlay";
 import Poster from "@/components/Poster";
@@ -135,7 +138,14 @@ const Particles = ({ shared }: { shared: SceneShared }) => {
       frustumCulled={false}
     >
       <sphereGeometry args={[1, 6, 6]} />
-      <meshBasicMaterial toneMapped={false} />
+      {/* additive: overlapping lights sum past 1.0 and start to bloom, so
+       * the field gets hotter the denser the traffic */}
+      <meshBasicMaterial
+        toneMapped={false}
+        transparent
+        depthWrite={false}
+        blending={THREE.AdditiveBlending}
+      />
     </instancedMesh>
   );
 };
@@ -177,7 +187,13 @@ const Core = ({ shared }: { shared: SceneShared }) => {
       {/* inner ember — only visible (and HDR) during the flash */}
       <mesh>
         <sphereGeometry args={[CAPTURE_RADIUS * 0.55, 16, 16]} />
-        <meshBasicMaterial ref={glowMat} toneMapped={false} />
+        <meshBasicMaterial
+          ref={glowMat}
+          toneMapped={false}
+          transparent
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
+        />
       </mesh>
     </group>
   );
@@ -316,6 +332,7 @@ const Scene = () => {
         sh.pulse.value = 1;
         sh.collapse.value = 1;
         sh.eject.count++;
+        sh.eject.slot = s.slot;
         audio.current.beat();
         const inst = s.txCount / 0.4;
         tpsRef.current =
@@ -351,10 +368,13 @@ const Scene = () => {
           frameloop={hidden ? "never" : "always"}
           gl={{ antialias: false, powerPreference: "high-performance" }}
         >
+          <Starfield />
+          <Validators shared={shared.current} />
           <Particles shared={shared.current} />
           <Whales shared={shared.current} />
           <Blocks shared={shared.current} />
           <Core shared={shared.current} />
+          <Shockwave shared={shared.current} />
           <CameraRig shared={shared.current} />
           <QualityGovernor
             onDegrade={() => setTier((t) => Math.min(t + 1, TIERS.length - 1))}

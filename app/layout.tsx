@@ -16,6 +16,9 @@ export const metadata: Metadata = {
   title: "Heartbeat — Solana, live",
   description:
     "A live 3D visualization of Solana. Every light is a real transaction; every pulse is a slot closing on mainnet.",
+  twitter: {
+    card: "summary_large_image",
+  },
 };
 
 export default function RootLayout({

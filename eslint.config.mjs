@@ -13,6 +13,9 @@ const eslintConfig = defineConfig([
     rules: {
       "react-hooks/immutability": "off",
       "react-hooks/refs": "off",
+      // procedural geometry (random star positions) is generated in useMemo
+      // on purpose — it must allocate once, not on every render
+      "react-hooks/purity": "off",
     },
   },
   // Override default ignores of eslint-config-next.

@@ -171,7 +171,12 @@ const Whales = ({ shared }: { shared: SceneShared }) => {
   return (
     <instancedMesh ref={mesh} args={[undefined, undefined, COUNT]} frustumCulled={false}>
       <sphereGeometry args={[1, 12, 12]} />
-      <meshBasicMaterial toneMapped={false} />
+      <meshBasicMaterial
+        toneMapped={false}
+        transparent
+        depthWrite={false}
+        blending={THREE.AdditiveBlending}
+      />
     </instancedMesh>
   );
 };

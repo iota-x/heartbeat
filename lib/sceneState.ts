@@ -19,8 +19,9 @@ export interface SceneShared {
   collapse: { value: number };
   /** camera shake amount → decays */
   shake: { value: number };
-  /** bumped once per slot close; the block chain watches it */
-  eject: { count: number };
+  /** bumped once per slot close; block chain, shockwave and validator ring
+   * watch it — slot number picks the flashing "leader" deterministically */
+  eject: { count: number; slot: number };
   /** written by the quality governor, read by the render loops */
   quality: { particleBudget: number };
   fx: SceneFx;
@@ -32,7 +33,7 @@ export const createShared = (): SceneShared => ({
   pulse: { value: 0 },
   collapse: { value: 0 },
   shake: { value: 0 },
-  eject: { count: 0 },
+  eject: { count: 0, slot: 0 },
   quality: { particleBudget: 4000 },
   fx: { onWhaleImpact: () => {} },
 });
