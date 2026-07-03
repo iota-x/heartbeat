@@ -1,0 +1,29 @@
+# fly.io config for the ingest service. deploy from server/:
+#   fly launch --copy-config --no-deploy
+#   fly secrets set HELIUS_API_KEY=...
+#   fly deploy
+app = "heartbeat-ingest"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8787"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  # one machine, always on — it holds the upstream Solana subscription
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 400
+    hard_limit = 500
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

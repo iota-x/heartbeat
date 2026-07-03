@@ -17,7 +17,7 @@ const WHALES = 24;
 const TRAIL = 10;
 const COUNT = WHALES * (TRAIL + 1);
 const SPAWN_RADIUS = 11;
-const CAPTURE_RADIUS = 0.8;
+const CAPTURE_RADIUS = 1.0;
 const HIST_STEP_S = 0.035; // seconds between trail samples
 
 const GOLD = new THREE.Color("#ffb347");
@@ -31,6 +31,7 @@ const Whales = ({ shared }: { shared: SceneShared }) => {
     vel: new Float32Array(WHALES * 3),
     scale: new Float32Array(WHALES),
     amount: new Float32Array(WHALES),
+    age: new Float32Array(WHALES),
     active: new Uint8Array(WHALES),
     hist: new Float32Array(WHALES * TRAIL * 3),
     histCursor: new Uint8Array(WHALES),
@@ -74,6 +75,7 @@ const Whales = ({ shared }: { shared: SceneShared }) => {
 
       s.scale[w] = 0.2 + Math.min(0.25, tx.weight * 0.035);
       s.amount[w] = tx.amountSol ?? 0;
+      s.age[w] = 0;
       s.active[w] = 1;
       s.histCursor[w] = 0;
       s.histTimer[w] = 0;
@@ -111,12 +113,16 @@ const Whales = ({ shared }: { shared: SceneShared }) => {
       const py = s.pos[w * 3 + 1];
       const pz = s.pos[w * 3 + 2];
       const d = Math.hypot(px, py, pz) || 1;
+      s.age[w] += dt;
 
-      // gravity well: the spiral tightens as it closes in
-      const pull = (2.6 / d) * dt;
-      s.vel[w * 3] += (-px / d) * pull * d;
-      s.vel[w * 3 + 1] += (-py / d) * pull * d;
-      s.vel[w * 3 + 2] += (-pz / d) * pull * d;
+      // gravity well that tightens with age, plus drag that bleeds off the
+      // tangential velocity — without it whales conserve angular momentum
+      // and orbit forever instead of impacting
+      const pull = 2.6 * (1 + Math.max(0, s.age[w] - 5) * 1.4) * dt;
+      const drag = Math.exp(-0.22 * dt);
+      s.vel[w * 3] = s.vel[w * 3] * drag + (-px / d) * pull;
+      s.vel[w * 3 + 1] = s.vel[w * 3 + 1] * drag + (-py / d) * pull;
+      s.vel[w * 3 + 2] = s.vel[w * 3 + 2] * drag + (-pz / d) * pull;
 
       s.pos[w * 3] += s.vel[w * 3] * dt;
       s.pos[w * 3 + 1] += s.vel[w * 3 + 1] * dt;
