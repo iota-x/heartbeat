@@ -18,7 +18,7 @@ const hub = startHub(config.port, config.whaleLamports);
 let status: FeedStatus = "connecting";
 let lastBlockSlot = 0;
 
-const stopUpstream = startUpstream(config.upstreamUrl, {
+const stopUpstream = startUpstream(config.upstreamUrl, config.upstreamHttpUrl, {
   onStatus: (next) => {
     status = next;
     hub.setStatus(next);
