@@ -4,11 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 
-import {
-  startSyntheticFeed,
-  type FeedTx,
-  type SlotSummary,
-} from "@/lib/feed";
+import { type FeedTx, type SlotSummary } from "@/lib/feed";
+import { startFeed, type FeedState } from "@/lib/feedSource";
 
 /* ------------------------------------------------------------------ */
 /*  the stream: transactions spawn on an outer ring and fall toward    */
@@ -154,9 +151,13 @@ const CORE_FLASH = new THREE.Color("#a78bfa");
 const Scene = () => {
   const shared = useRef<Shared>({ queue: [], pulse: { value: 0 } });
   const [slot, setSlot] = useState<SlotSummary | null>(null);
+  const [feed, setFeed] = useState<FeedState>({
+    mode: "synthetic",
+    label: "connecting…",
+  });
 
   useEffect(() => {
-    return startSyntheticFeed({
+    return startFeed({
       onTx: (tx) => {
         // drop excess dust under backpressure, never the interesting stuff
         if (shared.current.queue.length > 600 && tx.kind === "vote") return;
@@ -166,6 +167,7 @@ const Scene = () => {
         shared.current.pulse.value = 1;
         setSlot(s);
       },
+      onState: setFeed,
     });
   }, []);
 
@@ -180,7 +182,12 @@ const Scene = () => {
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between p-6 font-mono text-xs text-white/50">
         <div>
           <p className="text-white/80">heartbeat</p>
-          <p className="mt-1">every light is a transaction · synthetic feed</p>
+          <p className="mt-1">
+            every light is a transaction ·{" "}
+            <span className={feed.mode === "live" ? "text-emerald-300/70" : ""}>
+              {feed.label}
+            </span>
+          </p>
         </div>
         {slot && (
           <div className="text-right">

@@ -5,6 +5,16 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  {
+    // react-three-fiber render loops mutate preallocated objects on purpose
+    // (zero allocations per frame); the compiler-oriented purity rules would
+    // force React state into the 60fps hot path.
+    files: ["components/**/*.tsx"],
+    rules: {
+      "react-hooks/immutability": "off",
+      "react-hooks/refs": "off",
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:
