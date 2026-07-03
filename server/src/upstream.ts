@@ -16,6 +16,9 @@ const SLOT_SUB_ID = 2;
 const WATCHDOG_MS = 15_000;
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
+// free push endpoints can throttle delivery and drift behind the chain;
+// slot ticks tell us the real head, so reconnect if blocks go this stale
+const LAG_RESET_SLOTS = 300; // ~2 minutes
 
 export interface UpstreamEvents {
   onBlock: (slot: number, block: RawBlock) => void;
@@ -97,6 +100,7 @@ export const startUpstream = (url: string, httpUrl: string, events: UpstreamEven
   };
 
   let lastEmittedSlot = 0;
+  let lastTickSlot = 0;
 
   const startPollWorkers = () => {
     if (polling) return;
@@ -222,10 +226,9 @@ export const startUpstream = (url: string, httpUrl: string, events: UpstreamEven
       if (msg.method === "slotNotification") {
         const r = msg.params?.result as { slot?: number } | undefined;
         if (typeof r?.slot === "number") {
+          if (r.slot > lastTickSlot) lastTickSlot = r.slot;
           events.onSlotTick(r.slot);
-          if (pollMode) {
-            if (Date.now() >= pollDisabledUntil) pollQueue.push(r.slot);
-          }
+          if (pollMode && Date.now() >= pollDisabledUntil) pollQueue.push(r.slot);
         }
         return;
       }
@@ -240,6 +243,14 @@ export const startUpstream = (url: string, httpUrl: string, events: UpstreamEven
             sawBlock = true;
             events.onStatus("live");
             console.log("[upstream] live — first block at slot %d", v.slot);
+          }
+          if (lastTickSlot - v.slot > LAG_RESET_SLOTS) {
+            console.warn(
+              "[upstream] block stream %d slots behind head — resubscribing",
+              lastTickSlot - v.slot,
+            );
+            ws?.terminate();
+            return;
           }
           events.onBlock(v.slot, v.block);
         }

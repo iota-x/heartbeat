@@ -26,9 +26,9 @@ const num = (name: string, fallback: number): number => {
 const upstreamUrl = (): string => {
   const key = process.env.HELIUS_API_KEY;
   if (key) return `wss://mainnet.helius-rpc.com/?api-key=${key}`;
-  // keyless dev default — public RPC; usually refuses blockSubscribe, in
-  // which case we degrade to slots-only and the client shows it
-  return process.env.SOLANA_WS_URL ?? "wss://api.mainnet-beta.solana.com";
+  // keyless default: PublicNode serves blockSubscribe for free (full live
+  // mode, ~1min behind head); a Helius key trades that lag for ~3s
+  return process.env.SOLANA_WS_URL ?? "wss://solana-rpc.publicnode.com";
 };
 
 export const config = {

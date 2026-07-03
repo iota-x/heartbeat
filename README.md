@@ -18,12 +18,12 @@ dim monospace annotations in the corners.
 
 ```
  Solana mainnet
-      │  one websocket (Helius if HELIUS_API_KEY, else SOLANA_WS_URL):
-      │    1. blockSubscribe            (RPCs that enable it)
+      │  one websocket (Helius if HELIUS_API_KEY, else SOLANA_WS_URL,
+      │  default PublicNode — free blockSubscribe, keyless live mode):
+      │    1. blockSubscribe            (native 400ms push)
       │    2. else slotSubscribe ticks → HTTP getBlock polling, 3-way
-      │       concurrent, in-order     (any RPC with getBlock — free
-      │                                 Helius gives full live mode)
-      │    3. else slots-only          (degraded, badge shown)
+      │       concurrent, in-order      (any RPC with getBlock)
+      │    3. else slots-only           (degraded, badge shown)
       ▼
 ┌─────────────────┐   parse each block once: classify by program ID,
 │  server/        │   count votes, extract lamports, flag whales,
@@ -42,8 +42,8 @@ Feed modes, all verified end to end:
 
 | mode | what's real | when |
 |---|---|---|
-| `live` | everything | RPC serves `blockSubscribe` or `getBlock` (free Helius works) |
-| `hybrid` | slot numbers + cadence | keyless public RPC (blocks rate-limited away) |
+| `live` | everything | default: keyless via PublicNode (~1min lag) or Helius key (~3s lag) |
+| `hybrid` | slot numbers + cadence | RPC that serves neither blocks nor `getBlock` |
 | `synthetic` | nothing (realistic mix) | no feed URL, feed down, or WebGL-less poster |
 
 ## Running locally
@@ -54,18 +54,20 @@ Node 20 (`.nvmrc`). Two processes, both optional beyond the first:
 npm install && npm run dev        # web app — synthetic feed, zero config
 ```
 
-To feed it real chain data:
+To feed it real chain data — no key needed (PublicNode serves
+`blockSubscribe` for free; the stream runs ~1min behind the chain head
+and auto-resubscribes if it drifts past ~2min):
 
 ```sh
 cd server && npm install && cd ..
-npm run dev:ingest                # keyless: real slots, degraded to hybrid
+npm run dev:ingest                # keyless full live mode
 echo 'NEXT_PUBLIC_FEED_URL=ws://localhost:8787' > .env.local
 npm run dev
 ```
 
-With a free [Helius](https://helius.dev) key the full firehose flows
-(free tier lacks `blockSubscribe`, so the ingest polls `getBlock` — full
-block data at ~0.9s cadence; each block costs one API credit, worth
+A [Helius](https://helius.dev) key trades the ~1min lag for ~3s (their
+free tier lacks `blockSubscribe`, so the ingest polls `getBlock` at ~0.9s
+cadence / ~52% slot coverage; each block costs one API credit, worth
 knowing before leaving it running for days):
 
 ```sh
@@ -98,10 +100,11 @@ build (`next build && next start`), Chrome 1512×900.
   window). A representative block — slot 430,532,682, 1,171 txs, 3.43 MB
   upstream JSON — aggregates to **1,762 bytes**, a ~1,950× reduction.
   Slots-only mode is ~70 B per slot.
-- **~0.87s block cadence, monotonic, ~52% slot coverage** in free-key
-  polling mode (blocks are ~4 MB; three concurrent fetches, whales in
-  fetched blocks always included). `blockSubscribe`-capable endpoints get
-  every block at the native 400ms.
+- **100% block coverage keyless** via PublicNode `blockSubscribe`
+  (measured: 26/26 slots over 20s, monotonic, 2.2 KB/s, 4 whales),
+  running ~165 slots (~1min) behind head — the lag plateaus, and the
+  ingest resubscribes if it ever passes ~2min. Helius polling mode
+  instead: ~3s behind, ~52% coverage, ~0.87s cadence.
 - **~11 ms per slot** of server CPU against that same real block:
   10.1 ms `JSON.parse` + 0.89 ms classify/aggregate — ~2.7% of one core
   at mainnet's 400ms cadence.
