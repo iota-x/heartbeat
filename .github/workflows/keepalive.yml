@@ -1,0 +1,14 @@
+# Render's free tier sleeps after 15min idle; its 750 free instance-hours
+# cover a full month 24/7, so pinging every 10min keeps the ingest always
+# warm at $0. The ws server answers plain HTTP with 426 — any response
+# counts as activity, hence `|| true`.
+name: keep ingest awake
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -fsS -o /dev/null --max-time 30 https://heartbeat-ingest.onrender.com/ || true
