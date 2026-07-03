@@ -23,6 +23,18 @@ body {
   animation: hb-toast 2.4s ease-out forwards;
 }
 
+@keyframes hb-poster-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  12% {
+    transform: scale(1.07);
+    opacity: 1;
+  }
+}
+
 @keyframes hb-toast {
   0% {
     opacity: 0;

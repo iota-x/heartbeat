@@ -9,10 +9,12 @@ import { type FeedTx, type SlotSummary } from "@/lib/feed";
 import { startFeed, type FeedState } from "@/lib/feedSource";
 import { createShared, type SceneShared } from "@/lib/sceneState";
 import { HeartbeatAudio } from "@/lib/audio";
+import { TIERS, WARMUP_S, WINDOW_S, MIN_FPS } from "@/lib/quality";
 import Whales from "@/components/Whales";
 import Blocks from "@/components/Blocks";
 import Hud from "@/components/Hud";
 import Overlay from "@/components/Overlay";
+import Poster from "@/components/Poster";
 
 /* ------------------------------------------------------------------ */
 /*  the stream: transactions spawn on an outer ring and spiral toward  */
@@ -59,12 +61,18 @@ const Particles = ({ shared }: { shared: SceneShared }) => {
     const s = state.current;
     const dt = Math.min(delta, 0.05);
 
+    // adaptive budget: fewer instances drawn and recycled sooner when the
+    // quality governor has stepped down
+    const budget = Math.min(POOL, shared.quality.particleBudget);
+    m.count = budget;
+    if (s.cursor >= budget) s.cursor = 0;
+
     // drain queued transactions into the pool (capped per frame)
     const spawns = Math.min(shared.queue.length, MAX_SPAWNS_PER_FRAME);
     for (let n = 0; n < spawns; n++) {
       const tx = shared.queue[n];
       const i = s.cursor;
-      s.cursor = (s.cursor + 1) % POOL;
+      s.cursor = (s.cursor + 1) % budget;
 
       // spawn on a ring, with some depth scatter
       const a = Math.random() * Math.PI * 2;
@@ -96,7 +104,7 @@ const Particles = ({ shared }: { shared: SceneShared }) => {
 
     // advance + recycle; slot close sucks everything toward the core
     const collapsePull = shared.collapse.value * 9 * dt;
-    for (let i = 0; i < POOL; i++) {
+    for (let i = 0; i < budget; i++) {
       if (!s.alive[i]) {
         s.dummy.position.set(0, 0, 9999); // park dead instances off-screen
         s.dummy.scale.setScalar(0.0001);
@@ -175,6 +183,38 @@ const Core = ({ shared }: { shared: SceneShared }) => {
   );
 };
 
+/* measures real fps after a warmup and steps quality down when it can't
+ * hold the line; never steps back up, so it can't oscillate */
+const QualityGovernor = ({ onDegrade }: { onDegrade: () => void }) => {
+  const s = useRef({ frames: 0, windowStart: 0, warmedUp: false });
+
+  useFrame(({ clock }, delta) => {
+    const st = s.current;
+    const t = clock.elapsedTime;
+    if (!st.warmedUp) {
+      if (t < WARMUP_S) return;
+      st.warmedUp = true;
+      st.windowStart = t;
+      st.frames = 0;
+      return;
+    }
+    // a huge single-frame gap means a tab switch, not slow rendering
+    if (delta > 0.3) {
+      st.windowStart = t;
+      st.frames = 0;
+      return;
+    }
+    st.frames++;
+    if (t - st.windowStart >= WINDOW_S) {
+      const fps = st.frames / (t - st.windowStart);
+      if (fps < MIN_FPS) onDegrade();
+      st.windowStart = t;
+      st.frames = 0;
+    }
+  });
+  return null;
+};
+
 /* slow cinematic drift + impact shake, always looking at the core */
 const CameraRig = ({ shared }: { shared: SceneShared }) => {
   useFrame((state, delta) => {
@@ -207,8 +247,34 @@ const Scene = () => {
   const [muted, setMuted] = useState(true);
   const [toast, setToast] = useState<{ amountSol: number; id: number } | null>(null);
   const [showOverlay, setShowOverlay] = useState(false);
+  const [tier, setTier] = useState(0);
+  const [webgl, setWebgl] = useState<"unknown" | "ok" | "none">("unknown");
+  const [hidden, setHidden] = useState(false);
   const tpsRef = useRef(0);
   const lastToastAt = useRef(0);
+
+  // WebGL-less browsers get a static poster with live numbers instead of a
+  // black screen
+  useEffect(() => {
+    const probe = document.createElement("canvas");
+    const ok = Boolean(
+      probe.getContext("webgl2") ?? probe.getContext("webgl"),
+    );
+    const id = requestAnimationFrame(() => setWebgl(ok ? "ok" : "none"));
+    return () => cancelAnimationFrame(id);
+  }, []);
+
+  // pause rendering entirely when the tab is hidden; the websocket stays up
+  useEffect(() => {
+    const onVis = () => setHidden(document.hidden);
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  // apply the tier's particle budget to the render loops
+  useEffect(() => {
+    shared.current.quality.particleBudget = TIERS[tier].particleBudget;
+  }, [tier]);
 
   // whale impacts: shake the camera, thump, toast (throttled)
   useEffect(() => {
@@ -274,22 +340,38 @@ const Scene = () => {
     setShowOverlay(false);
   };
 
+  const q = TIERS[tier];
+
   return (
     <div className="fixed inset-0 bg-[#07050d]">
-      <Canvas
-        camera={{ position: [0, 0, 13], fov: 50 }}
-        dpr={[1, 1.5]}
-        gl={{ antialias: false, powerPreference: "high-performance" }}
-      >
-        <Particles shared={shared.current} />
-        <Whales shared={shared.current} />
-        <Blocks shared={shared.current} />
-        <Core shared={shared.current} />
-        <CameraRig shared={shared.current} />
-        <EffectComposer multisampling={0}>
-          <Bloom mipmapBlur intensity={0.85} luminanceThreshold={1} luminanceSmoothing={0.1} />
-        </EffectComposer>
-      </Canvas>
+      {webgl === "ok" && (
+        <Canvas
+          camera={{ position: [0, 0, 13], fov: 50 }}
+          dpr={[1, q.dpr]}
+          frameloop={hidden ? "never" : "always"}
+          gl={{ antialias: false, powerPreference: "high-performance" }}
+        >
+          <Particles shared={shared.current} />
+          <Whales shared={shared.current} />
+          <Blocks shared={shared.current} />
+          <Core shared={shared.current} />
+          <CameraRig shared={shared.current} />
+          <QualityGovernor
+            onDegrade={() => setTier((t) => Math.min(t + 1, TIERS.length - 1))}
+          />
+          {q.bloom && (
+            <EffectComposer multisampling={0}>
+              <Bloom
+                mipmapBlur
+                intensity={0.85}
+                luminanceThreshold={1}
+                luminanceSmoothing={0.1}
+              />
+            </EffectComposer>
+          )}
+        </Canvas>
+      )}
+      {webgl === "none" && <Poster feed={feed} slot={slot} tps={tps} />}
 
       <Hud
         feed={feed}

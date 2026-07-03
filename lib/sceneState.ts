@@ -21,6 +21,8 @@ export interface SceneShared {
   shake: { value: number };
   /** bumped once per slot close; the block chain watches it */
   eject: { count: number };
+  /** written by the quality governor, read by the render loops */
+  quality: { particleBudget: number };
   fx: SceneFx;
 }
 
@@ -31,5 +33,6 @@ export const createShared = (): SceneShared => ({
   collapse: { value: 0 },
   shake: { value: 0 },
   eject: { count: 0 },
+  quality: { particleBudget: 4000 },
   fx: { onWhaleImpact: () => {} },
 });
