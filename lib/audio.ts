@@ -4,7 +4,10 @@
 // sound design: everything is tuned to D major pentatonic over a slowly
 // breathing drone, so chain-driven events always land consonant. slot closes
 // walk a music-box arpeggio; whales are a deep sub swell plus a rising vocal
-// "call" through a long shimmering reverb.
+// "call" through a long shimmering reverb. the bed follows the network: TPS
+// opens the air/halo layers and densifies the sparkle, and every couple of
+// minutes the drone drifts to a related chord center so long sessions never
+// go stale.
 
 const ROOT = 73.42; // D2
 // major pentatonic ratios relative to the root
@@ -13,18 +16,36 @@ const SCALE = [1, 9 / 8, 5 / 4, 3 / 2, 5 / 3];
 const PATTERN: [number, number][] = [
   [0, 0], [2, 0], [4, 0], [1, 1], [3, 0], [0, 1], [4, 0], [2, 0],
 ];
+// chord centers the drone drifts between — D, B below, G above. the melody
+// pool stays on D pentatonic, which is consonant over all three (D major,
+// Bm11, Gmaj9).
+const CENTERS = [1, 2 ** (-3 / 12), 2 ** (5 / 12)];
 
 const degToFreq = (deg: number, octave: number) =>
   ROOT * 4 * SCALE[deg % SCALE.length] * 2 ** octave;
 
+interface DroneVoice {
+  osc: OscillatorNode;
+  det: OscillatorNode;
+  mult: number; // frequency relative to the current chord center root
+}
+
 export class HeartbeatAudio {
   private ctx: AudioContext | null = null;
+  private master: GainNode | null = null;
   private bus: GainNode | null = null; // pre-compressor mix bus
   private wet: GainNode | null = null; // reverb send
   private droneGain: GainNode | null = null;
+  private droneVoices: DroneVoice[] = [];
+  private airGain: GainNode | null = null;
+  private airFilter: BiquadFilterNode | null = null;
+  private haloGain: GainNode | null = null;
   private noise: AudioBuffer | null = null;
-  private glimmerTimer: ReturnType<typeof setTimeout> | null = null;
+  private timers: Partial<Record<"glimmer" | "sparkle" | "drift", ReturnType<typeof setTimeout>>> = {};
   private step = 0;
+  private center = 1; // current chord center multiplier
+  private activity = 0.3; // smoothed 0..1 network load
+  private volume = 0.5;
   enabled = false;
 
   enable() {
@@ -32,15 +53,47 @@ export class HeartbeatAudio {
     void this.ctx!.resume();
     this.enabled = true;
     this.scheduleGlimmer();
+    this.scheduleSparkle();
+    this.scheduleDrift();
   }
 
   disable() {
     this.enabled = false;
-    if (this.glimmerTimer) {
-      clearTimeout(this.glimmerTimer);
-      this.glimmerTimer = null;
-    }
+    for (const t of Object.values(this.timers)) clearTimeout(t);
+    this.timers = {};
     void this.ctx?.suspend();
+  }
+
+  /** run `tick` in a self-rescheduling loop; no-op if already running */
+  private loop(key: keyof typeof this.timers, delay: () => number, tick: () => void) {
+    if (this.timers[key]) return;
+    const run = () => {
+      this.timers[key] = setTimeout(run, delay());
+      if (this.enabled && this.ctx) tick();
+    };
+    this.timers[key] = setTimeout(run, delay());
+  }
+
+  /** master volume 0..1; safe to call while muted or before first enable() */
+  setVolume(v: number) {
+    this.volume = Math.max(0, Math.min(1, v));
+    if (this.ctx && this.master)
+      this.master.gain.setTargetAtTime(this.volume, this.ctx.currentTime, 0.05);
+  }
+
+  /**
+   * network load 0..1 — opens the air/halo layers, densifies sparkle and
+   * glimmers, and lets the arpeggio double up. call as often as you like;
+   * it is smoothed internally.
+   */
+  setActivity(a: number) {
+    this.activity += (Math.max(0, Math.min(1, a)) - this.activity) * 0.15;
+    const ctx = this.ctx;
+    if (!ctx || !this.airGain || !this.haloGain || !this.airFilter) return;
+    const t = ctx.currentTime;
+    this.airGain.gain.setTargetAtTime(0.008 + 0.016 * this.activity, t, 1.5);
+    this.haloGain.gain.setTargetAtTime(0.005 + 0.016 * this.activity, t, 1.5);
+    this.airFilter.frequency.setTargetAtTime(450 + 650 * this.activity, t, 2);
   }
 
   private build() {
@@ -54,10 +107,10 @@ export class HeartbeatAudio {
     comp.ratio.value = 4;
     comp.attack.value = 0.01;
     comp.release.value = 0.3;
-    const master = ctx.createGain();
-    master.gain.value = 0.5;
+    this.master = ctx.createGain();
+    this.master.gain.value = this.volume;
     this.bus = ctx.createGain();
-    this.bus.connect(comp).connect(master).connect(ctx.destination);
+    this.bus.connect(comp).connect(this.master).connect(ctx.destination);
 
     // shared noise buffer: thump snaps, whooshes, the drone "air" layer
     const nLen = Math.floor(ctx.sampleRate * 2);
@@ -90,13 +143,13 @@ export class HeartbeatAudio {
     drone.connect(this.wet!);
     this.droneGain = drone;
 
-    const voice = (freq: number, gain: number, lfoRate: number, lfoPhase: number) => {
+    const voice = (mult: number, gain: number, lfoRate: number, lfoPhase: number) => {
       const osc = ctx.createOscillator();
       osc.type = "sine";
-      osc.frequency.value = freq;
+      osc.frequency.value = ROOT * mult;
       const det = ctx.createOscillator();
       det.type = "sine";
-      det.frequency.value = freq;
+      det.frequency.value = ROOT * mult;
       det.detune.value = 4; // slow chorus beating against its twin
       const g = ctx.createGain();
       g.gain.value = gain;
@@ -113,10 +166,12 @@ export class HeartbeatAudio {
       osc.start(t);
       det.start(t + lfoPhase); // desync the beating between voices
       lfo.start(t);
+      this.droneVoices.push({ osc, det, mult });
+      return g;
     };
-    voice(ROOT, 0.055, 0.05, 0.13); // D2 root
-    voice(ROOT * 1.5, 0.035, 0.037, 0.29); // A2 fifth
-    voice(ROOT * 4, 0.012, 0.061, 0.41); // faint D4 halo
+    voice(1, 0.055, 0.05, 0.13); // root
+    voice(1.5, 0.035, 0.037, 0.29); // fifth
+    this.haloGain = voice(4, 0.01, 0.061, 0.41); // faint upper halo
 
     // "air": bandpass noise drifting slowly between 300 and 900 Hz
     const air = ctx.createBufferSource();
@@ -126,6 +181,7 @@ export class HeartbeatAudio {
     bp.type = "bandpass";
     bp.frequency.value = 600;
     bp.Q.value = 1.4;
+    this.airFilter = bp;
     const sweep = ctx.createOscillator();
     sweep.frequency.value = 0.023;
     const sg = ctx.createGain();
@@ -133,6 +189,7 @@ export class HeartbeatAudio {
     sweep.connect(sg).connect(bp.frequency);
     const ag = ctx.createGain();
     ag.gain.value = 0.014;
+    this.airGain = ag;
     air.connect(bp).connect(ag);
     ag.connect(drone);
     ag.connect(this.wet!);
@@ -140,19 +197,34 @@ export class HeartbeatAudio {
     sweep.start();
   }
 
+  /** every ~2 min the bed migrates to a related chord center over ~12s */
+  private scheduleDrift() {
+    this.loop("drift", () => 90_000 + Math.random() * 60_000, () => {
+      const ctx = this.ctx!;
+      const next = CENTERS.filter((c) => c !== this.center)[
+        Math.floor(Math.random() * (CENTERS.length - 1))
+      ];
+      this.center = next;
+      const t = ctx.currentTime;
+      for (const v of this.droneVoices) {
+        const f = ROOT * next * v.mult;
+        v.osc.frequency.setTargetAtTime(f, t, 4);
+        v.det.frequency.setTargetAtTime(f, t, 4);
+      }
+    });
+  }
+
   /** occasional long pad swell — keeps the bed evolving so ears don't tune out */
   private scheduleGlimmer() {
-    if (this.glimmerTimer) return;
-    const tick = () => {
-      this.glimmerTimer = setTimeout(tick, 5_000 + Math.random() * 7_000);
-      const ctx = this.ctx;
-      if (!this.enabled || !ctx || !this.wet) return;
+    // busier network -> glimmers come noticeably closer together
+    this.loop("glimmer", () => 4_000 + (1 - this.activity) * 8_000 + Math.random() * 4_000, () => {
+      const ctx = this.ctx!;
       const t = ctx.currentTime;
       const deg = Math.floor(Math.random() * SCALE.length);
       const oct = Math.random() < 0.35 ? 2 : 1;
       const pan = ctx.createStereoPanner();
       pan.pan.value = Math.random() * 1.4 - 0.7;
-      pan.connect(this.wet);
+      pan.connect(this.wet!);
       for (const [f, g] of [
         [degToFreq(deg, oct), 0.05],
         [degToFreq(deg, oct) * 1.5, 0.028],
@@ -168,68 +240,103 @@ export class HeartbeatAudio {
         osc.start(t);
         osc.stop(t + 5.6);
       }
-    };
-    this.glimmerTimer = setTimeout(tick, 1_200);
+    });
   }
 
-  /** deep swell + rising call + bell cluster for whale impacts; intensity 0..1 */
-  thump(intensity: number) {
+  /** dust: a continuous rain of tiny grains whose density tracks the tx flow */
+  private scheduleSparkle() {
+    // 0.5 grains/s when idle, up to 8/s when the chain runs hot
+    this.loop("sparkle", () => (1_000 / (0.5 + 7.5 * this.activity)) * (0.5 + Math.random()), () => {
+      const ctx = this.ctx!;
+      const t = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value =
+        degToFreq(Math.floor(Math.random() * SCALE.length), 2) *
+        (Math.random() < 0.3 ? 2 : 1);
+      const env = ctx.createGain();
+      env.gain.setValueAtTime(0, t);
+      env.gain.linearRampToValueAtTime(0.004 + Math.random() * 0.007, t + 0.005);
+      env.gain.exponentialRampToValueAtTime(0.001, t + 0.12 + Math.random() * 0.1);
+      const pan = ctx.createStereoPanner();
+      pan.pan.value = Math.random() * 1.8 - 0.9;
+      osc.connect(env).connect(pan).connect(this.wet!);
+      osc.start(t);
+      osc.stop(t + 0.25);
+    });
+  }
+
+  /**
+   * whale impact: deep swell + call + bell cluster. intensity 0..1 sets the
+   * punch; amountSol sets the character — bigger whales call lower, longer,
+   * with more bells.
+   */
+  thump(intensity: number, amountSol = 0) {
     const ctx = this.ctx;
     if (!this.enabled || !ctx || !this.bus || !this.wet || !this.noise) return;
     const t = ctx.currentTime;
+    // 10 SOL ≈ 0.3, 1k SOL ≈ 0.86, 3k+ SOL = 1
+    const size = Math.min(1, Math.log10(Math.max(10, amountSol)) / 3.5);
+    const root = ROOT * this.center;
 
     // duck the drone so the whale owns the moment, then breathe back in
     if (this.droneGain) {
       this.droneGain.gain.cancelScheduledValues(t);
-      this.droneGain.gain.setTargetAtTime(0.45, t, 0.06);
-      this.droneGain.gain.setTargetAtTime(0.9, t + 0.5, 0.8);
+      this.droneGain.gain.setTargetAtTime(0.45 - 0.15 * size, t, 0.06);
+      this.droneGain.gain.setTargetAtTime(0.9, t + 0.5 + 0.8 * size, 0.8);
     }
 
-    // sub swell: felt more than heard
+    // sub swell: felt more than heard; giants linger
+    const subDur = 1.1 + 1.1 * size;
     const sub = ctx.createOscillator();
     sub.type = "sine";
-    sub.frequency.setValueAtTime(ROOT, t);
-    sub.frequency.exponentialRampToValueAtTime(ROOT / 2.6, t + 1.1);
+    sub.frequency.setValueAtTime(root, t);
+    sub.frequency.exponentialRampToValueAtTime(root / 2.6, t + subDur * 0.8);
     const sg = ctx.createGain();
     sg.gain.setValueAtTime(0, t);
     sg.gain.linearRampToValueAtTime(0.4 + 0.35 * intensity, t + 0.02);
-    sg.gain.exponentialRampToValueAtTime(0.001, t + 1.4);
+    sg.gain.exponentialRampToValueAtTime(0.001, t + subDur + 0.3);
     sub.connect(sg).connect(this.bus);
     sub.start(t);
-    sub.stop(t + 1.5);
+    sub.stop(t + subDur + 0.4);
 
-    // the "call": a vowel-ish tone gliding root -> fifth with growing vibrato
+    // the "call": glides up a fifth with growing vibrato. big whales start an
+    // octave down and stretch out — slower, deeper, more animal.
+    const callDur = 0.9 + 1.3 * size;
+    const callF = (root * 2) / (1 + size);
     const call = ctx.createOscillator();
     call.type = "sine";
-    call.frequency.setValueAtTime(ROOT * 2, t);
-    call.frequency.exponentialRampToValueAtTime(ROOT * 3, t + 0.9);
+    call.frequency.setValueAtTime(callF, t);
+    call.frequency.exponentialRampToValueAtTime(callF * 1.5, t + callDur);
     const vib = ctx.createOscillator();
-    vib.frequency.value = 4.5;
+    vib.frequency.value = 4.5 - 1.5 * size;
     const vg = ctx.createGain();
     vg.gain.setValueAtTime(0, t);
-    vg.gain.linearRampToValueAtTime(6 + 8 * intensity, t + 0.9);
+    vg.gain.linearRampToValueAtTime(6 + 8 * intensity, t + callDur);
     vib.connect(vg).connect(call.frequency);
     const cg = ctx.createGain();
     cg.gain.setValueAtTime(0, t);
-    cg.gain.linearRampToValueAtTime(0.10 + 0.10 * intensity, t + 0.25);
-    cg.gain.exponentialRampToValueAtTime(0.001, t + 1.8);
+    cg.gain.linearRampToValueAtTime(0.10 + 0.10 * intensity + 0.05 * size, t + 0.25);
+    cg.gain.exponentialRampToValueAtTime(0.001, t + callDur + 0.9);
     const cpan = ctx.createStereoPanner();
     cpan.pan.value = Math.random() * 0.8 - 0.4;
     call.connect(cg).connect(cpan);
     cpan.connect(this.wet);
     cpan.connect(this.bus);
     call.start(t);
-    call.stop(t + 1.9);
+    call.stop(t + callDur + 1);
     vib.start(t);
-    vib.stop(t + 1.9);
+    vib.stop(t + callDur + 1);
 
     // shimmering bell cluster fanning upward through the reverb
     const deg = Math.floor(Math.random() * SCALE.length);
-    [0, 2, 4].forEach((off, i) => {
+    const bells = 3 + Math.round(2 * size);
+    for (let i = 0; i < bells; i++) {
+      const off = i * 2;
       const at = t + 0.08 + i * 0.09;
-      this.chime(degToFreq(deg + off, 1 + (deg + off >= SCALE.length ? 1 : 0)),
-        0.03 + 0.025 * intensity, at, (i - 1) * 0.5);
-    });
+      this.chime(degToFreq(deg + off, 1 + Math.floor((deg + off) / SCALE.length)),
+        0.03 + 0.025 * intensity, at, (i - (bells - 1) / 2) * 0.4);
+    }
 
     // airy whoosh rising with the call
     const whoosh = ctx.createBufferSource();
@@ -238,14 +345,14 @@ export class HeartbeatAudio {
     bp.type = "bandpass";
     bp.Q.value = 2;
     bp.frequency.setValueAtTime(250, t);
-    bp.frequency.exponentialRampToValueAtTime(1_800, t + 0.9);
+    bp.frequency.exponentialRampToValueAtTime(1_800 - 600 * size, t + callDur);
     const wg = ctx.createGain();
     wg.gain.setValueAtTime(0, t);
     wg.gain.linearRampToValueAtTime(0.05 + 0.09 * intensity, t + 0.3);
-    wg.gain.exponentialRampToValueAtTime(0.001, t + 1.1);
+    wg.gain.exponentialRampToValueAtTime(0.001, t + callDur + 0.2);
     whoosh.connect(bp).connect(wg).connect(this.wet);
     whoosh.start(t);
-    whoosh.stop(t + 1.2);
+    whoosh.stop(t + callDur + 0.3);
   }
 
   /** slot close — a soft pulse plus the next step of the music-box arpeggio */
@@ -273,6 +380,11 @@ export class HeartbeatAudio {
     const pan = (this.step % 2 === 0 ? -1 : 1) * (0.25 + 0.2 * Math.random());
     this.step++;
     this.chime(degToFreq(deg, oct), 0.038 * accent, t, pan);
+
+    // under load the melody doubles up: an off-beat echo one step higher
+    if (Math.random() < this.activity * 0.45) {
+      this.chime(degToFreq(deg + 1, oct), 0.02, t + 0.2, -pan);
+    }
   }
 
   /** crystalline music-box voice: fundamental + soft octave partial, wet-heavy */

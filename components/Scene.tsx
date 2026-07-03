@@ -261,6 +261,7 @@ const Scene = () => {
   });
   const [tps, setTps] = useState(0);
   const [muted, setMuted] = useState(true);
+  const [volume, setVolume] = useState(0.5);
   const [toast, setToast] = useState<{ amountSol: number; id: number } | null>(null);
   const [showOverlay, setShowOverlay] = useState(false);
   const [tier, setTier] = useState(0);
@@ -298,13 +299,23 @@ const Scene = () => {
     sh.fx.onWhaleImpact = (intensity, amountSol) => {
       sh.shake.value = Math.min(1, sh.shake.value + 0.35 + 0.5 * intensity);
       sh.pulse.value = Math.min(1.2, sh.pulse.value + 0.35);
-      audio.current.thump(intensity);
+      audio.current.thump(intensity, amountSol);
       const now = Date.now();
       if (amountSol > 0 && now - lastToastAt.current > 1_500) {
         lastToastAt.current = now;
         setToast({ amountSol, id: now });
       }
     };
+  }, []);
+
+  // restore saved volume (localStorage is client-only) — deferred a frame to
+  // keep hydration clean, same as the overlay below
+  useEffect(() => {
+    const v = Number(localStorage.getItem("hb-vol"));
+    if (!(v > 0 && v <= 1)) return;
+    audio.current.setVolume(v);
+    const id = requestAnimationFrame(() => setVolume(v));
+    return () => cancelAnimationFrame(id);
   }, []);
 
   // overlay decision must wait for the client (localStorage) — deferred a
@@ -337,6 +348,8 @@ const Scene = () => {
         const inst = s.txCount / 0.4;
         tpsRef.current =
           tpsRef.current === 0 ? inst : tpsRef.current * 0.75 + inst * 0.25;
+        // soft-knee normalization: ~0.5 at 1.5k tps, ~0.7 at 3.5k
+        audio.current.setActivity(tpsRef.current / (tpsRef.current + 1_500));
         setTps(tpsRef.current);
         setSlot(s);
       },
@@ -350,6 +363,12 @@ const Scene = () => {
       else audio.current.disable();
       return !m;
     });
+  };
+
+  const changeVolume = (v: number) => {
+    setVolume(v);
+    audio.current.setVolume(v);
+    localStorage.setItem("hb-vol", String(v));
   };
 
   const dismissOverlay = () => {
@@ -399,6 +418,8 @@ const Scene = () => {
         tps={tps}
         muted={muted}
         onToggleSound={toggleSound}
+        volume={volume}
+        onVolume={changeVolume}
         toast={toast}
       />
       {showOverlay && <Overlay onDismiss={dismissOverlay} />}

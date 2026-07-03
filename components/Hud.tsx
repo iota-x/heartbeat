@@ -12,6 +12,8 @@ interface HudProps {
   tps: number;
   muted: boolean;
   onToggleSound: () => void;
+  volume: number;
+  onVolume: (v: number) => void;
   toast: { amountSol: number; id: number } | null;
 }
 
@@ -29,7 +31,7 @@ const feeLevel = (slot: SlotSummary | null): string => {
   return "high";
 };
 
-const Hud = ({ feed, slot, tps, muted, onToggleSound, toast }: HudProps) => (
+const Hud = ({ feed, slot, tps, muted, onToggleSound, volume, onVolume, toast }: HudProps) => (
   <div className="pointer-events-none absolute inset-0 font-mono text-xs text-white/50">
     {/* top-left: wordmark + feed mode */}
     <div className="absolute left-6 top-6">
@@ -58,13 +60,27 @@ const Hud = ({ feed, slot, tps, muted, onToggleSound, toast }: HudProps) => (
     {/* bottom-left: one sentence + sound toggle */}
     <div className="absolute bottom-6 left-6">
       <p>every light is a transaction</p>
-      <button
-        type="button"
-        onClick={onToggleSound}
-        className="pointer-events-auto mt-2 rounded border border-white/15 px-2 py-1 text-white/40 transition-colors hover:border-white/40 hover:text-white/80"
-      >
-        {muted ? "sound off" : "sound on"}
-      </button>
+      <div className="mt-2 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={onToggleSound}
+          className="pointer-events-auto rounded border border-white/15 px-2 py-1 text-white/40 transition-colors hover:border-white/40 hover:text-white/80"
+        >
+          {muted ? "sound off" : "sound on"}
+        </button>
+        {!muted && (
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={volume}
+            onChange={(e) => onVolume(Number(e.target.value))}
+            aria-label="volume"
+            className="pointer-events-auto h-1 w-20 cursor-pointer appearance-none rounded-full bg-white/20 accent-white/70"
+          />
+        )}
+      </div>
     </div>
 
     {/* bottom-right: slot / tps */}
